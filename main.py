@@ -1,12 +1,7 @@
 from fastapi import FastAPI, UploadFile, File
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from huggingface_hub import InferenceClient
-import edge_tts
 import os
-import io
-import tempfile
-import asyncio
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -26,7 +21,6 @@ MODELS = [
 ]
 
 STT_MODEL = "openai/whisper-large-v3-turbo"
-TTS_VOICE = "en-US-ChristopherNeural"
 
 
 class ChatRequest(BaseModel):
@@ -69,20 +63,9 @@ def generate_response(text: str) -> str:
     raise Exception("All models are currently unavailable.")
 
 
-async def text_to_speech(text: str) -> bytes:
-    """Convert text to MP3 audio using Edge TTS."""
-    communicate = edge_tts.Communicate(text, TTS_VOICE)
-    audio_buffer = io.BytesIO()
-    async for chunk in communicate.stream():
-        if chunk["type"] == "audio":
-            audio_buffer.write(chunk["data"])
-    audio_buffer.seek(0)
-    return audio_buffer.getvalue()
-
-
 @app.post("/voice")
 async def voice(audio: UploadFile = File(...)):
-    """Full pipeline: Audio in → STT → LLM → TTS → Audio out"""
+    """Full pipeline: Audio in → STT → LLM → Text out"""
     if not hf_client:
         return {"error": "HF_API_KEY not configured"}
 
@@ -96,17 +79,7 @@ async def voice(audio: UploadFile = File(...)):
         reply = generate_response(transcript)
         print(f"LLM: {reply}")
 
-        # Step 3: Text-to-Speech
-        audio_response = await text_to_speech(reply)
-
-        return StreamingResponse(
-            io.BytesIO(audio_response),
-            media_type="audio/mpeg",
-            headers={
-                "X-Transcript": transcript,
-                "X-Reply": reply[:200],
-            }
-        )
+        return {"transcript": transcript, "response": reply}
     except Exception as e:
         print(f"Error in /voice: {e}")
         return {"error": str(e)}
@@ -121,19 +94,6 @@ def chat(req: ChatRequest):
     try:
         reply = generate_response(req.message)
         return {"response": reply}
-    except Exception as e:
-        return {"error": str(e)}
-
-
-@app.post("/tts")
-async def tts(req: ChatRequest):
-    """Text in → Audio out"""
-    try:
-        audio = await text_to_speech(req.message)
-        return StreamingResponse(
-            io.BytesIO(audio),
-            media_type="audio/mpeg",
-        )
     except Exception as e:
         return {"error": str(e)}
 
