@@ -1,6 +1,9 @@
 from fastapi import FastAPI, UploadFile, File
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from huggingface_hub import InferenceClient
+import edge_tts
+import io
 import os
 from dotenv import load_dotenv
 
@@ -17,10 +20,10 @@ app = FastAPI(title="Voice Assistant Cloud Backend")
 MODELS = [
     "meta-llama/Meta-Llama-3-8B-Instruct",
     "mistralai/Mistral-7B-Instruct-v0.2",
-    "Qwen/Qwen2.5-72B-Instruct",
 ]
 
 STT_MODEL = "openai/whisper-large-v3-turbo"
+TTS_VOICE = "en-US-ChristopherNeural"
 
 
 class ChatRequest(BaseModel):
@@ -33,7 +36,7 @@ def transcribe_audio(audio_bytes: bytes) -> str:
         audio=audio_bytes,
         model=STT_MODEL,
     )
-    return result.text
+    return getattr(result, "text", "")
 
 
 def generate_response(text: str) -> str:
@@ -63,9 +66,20 @@ def generate_response(text: str) -> str:
     raise Exception("All models are currently unavailable.")
 
 
+async def text_to_speech(text: str) -> bytes:
+    """Convert text to MP3 audio using Edge TTS."""
+    communicate = edge_tts.Communicate(text, TTS_VOICE)
+    audio_buffer = io.BytesIO()
+    async for chunk in communicate.stream():
+        if chunk["type"] == "audio":
+            audio_buffer.write(chunk["data"])
+    audio_buffer.seek(0)
+    return audio_buffer.getvalue()
+
+
 @app.post("/voice")
 async def voice(audio: UploadFile = File(...)):
-    """Full pipeline: Audio in → STT → LLM → Text out"""
+    """Full pipeline: Audio in → STT → LLM → TTS → Audio out"""
     if not hf_client:
         return {"error": "HF_API_KEY not configured"}
 
@@ -79,7 +93,17 @@ async def voice(audio: UploadFile = File(...)):
         reply = generate_response(transcript)
         print(f"LLM: {reply}")
 
-        return {"transcript": transcript, "response": reply}
+        # Step 3: Text-to-Speech
+        audio_response = await text_to_speech(reply)
+
+        return StreamingResponse(
+            io.BytesIO(audio_response),
+            media_type="audio/mpeg",
+            headers={
+                "X-Transcript": transcript,
+                "X-Reply": reply[:200],
+            }
+        )
     except Exception as e:
         print(f"Error in /voice: {e}")
         return {"error": str(e)}
@@ -98,6 +122,19 @@ def chat(req: ChatRequest):
         return {"error": str(e)}
 
 
+@app.post("/tts")
+async def tts(req: ChatRequest):
+    """Text in → Audio out"""
+    try:
+        audio = await text_to_speech(req.message)
+        return StreamingResponse(
+            io.BytesIO(audio),
+            media_type="audio/mpeg",
+        )
+    except Exception as e:
+        return {"error": str(e)}
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
@@ -105,4 +142,5 @@ def health():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)

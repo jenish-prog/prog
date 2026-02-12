@@ -3,3 +3,4 @@ uvicorn
 huggingface-hub
 python-dotenv
 python-multipart
+edge-tts
