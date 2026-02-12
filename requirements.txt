@@ -1,0 +1,4 @@
+SpeechRecognition
+pyaudio
+huggingface-hub
+edge-tts
